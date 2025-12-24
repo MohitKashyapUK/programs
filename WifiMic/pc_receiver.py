@@ -39,44 +39,53 @@ def cleanup():
     subprocess.run(["pactl", "unload-module", "module-remap-source"], stderr=subprocess.DEVNULL)
     subprocess.run(["pactl", "unload-module", "module-null-sink"], stderr=subprocess.DEVNULL)
 
-def start_receiver():
+def get_default_gateway():
+    try:
+        # Run 'ip route show default' to find the gateway
+        out = subprocess.check_output(["ip", "route", "show", "default"]).decode()
+        # Typical output: 'default via 10.51.169.135 dev wlan0 ...'
+        parts = out.split()
+        if "via" in parts:
+            idx = parts.index("via")
+            return parts[idx + 1]
+    except Exception as e:
+        print(f"Could not auto-detect gateway: {e}")
+    return None
+
+def start_receiver(mobile_ip=None):
+    if not mobile_ip:
+        mobile_ip = get_default_gateway()
+        if not mobile_ip:
+            print("[ ERROR ] Could not find Mobile IP (Hotspot Gateway). Please provide it manually.")
+            return
+        print(f"[ AUTO ] Detected Mobile IP: {mobile_ip}")
+
     # Setup virtual mic
     try:
         setup_virtual_mic()
     except Exception as e:
-        print(f"Warning: Failed to setup virtual mic automatically: {e}")
-        print("You might need to install 'pulseaudio-utils' or 'libpulse'.")
+        print(f"Warning: {e}")
 
     atexit.register(cleanup)
-
     p = pyaudio.PyAudio()
 
-    # Find the index of our virtual sink or pulse/pipewire wrapper
+    # Find the index of our virtual sink
     target_index = None
-    print("\n--- Available Audio Devices ---")
-    devices = []
     for i in range(p.get_device_count()):
         dev = p.get_device_info_by_index(i)
-        devices.append(dev)
-        print(f"Index {i}: {dev['name']}")
-
-    # Priority 1: The actual Sink
-    for dev in devices:
         if SINK_NAME.lower() in dev['name'].lower():
             target_index = dev['index']
-            print(f"-> Found Specific Sink: {dev['name']}")
             break
     
-    # Priority 2: Pulse/Pipewire
+    # If sink not found, use pulse/pipewire
     if target_index is None:
-        for dev in devices:
-            name = dev['name'].lower()
-            if 'pulse' in name or 'pipewire' in name:
-                target_index = dev['index']
-                print(f"-> Using Sound Server: {dev['name']}")
+        for i in range(p.get_device_count()):
+            dev = p.get_device_info_by_index(i)
+            if 'pulse' in dev['name'].lower() or 'pipewire' in dev['name'].lower():
+                target_index = i
                 break
 
-    # Open stream
+    # Open playback stream
     stream = p.open(format=FORMAT,
                     channels=2, 
                     rate=RATE,
@@ -84,65 +93,52 @@ def start_receiver():
                     output_device_index=target_index,
                     frames_per_buffer=CHUNK)
 
-    # Initialize UDP Socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(1.0)
-    sock.bind(("0.0.0.0", PORT))
-    
-    print(f"\n--- RECEIVER ACTIVE ---")
-    print(f"IP Address: 10.51.169.128")
-    print("-----------------------\n")
+    # TCP Client: Connect to Mobile
+    print(f"Connecting to mobile at {mobile_ip}:{PORT}...")
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5.0) # Timeout for connection
+        sock.connect((mobile_ip, PORT))
+        print("[ SUCCESS ] Connected to Mobile Mic!")
+    except Exception as e:
+        print(f"[ ERROR ] Could not connect: {e}")
+        return
 
     # Force movement to WifiMicSink
     def force_route():
         import time
-        print("[ ROUTING ] Searching for audio stream...")
-        for _ in range(15): # Try for 7.5 seconds
+        for _ in range(10):
             time.sleep(0.5)
             try:
-                # Get detailed list of all sink-inputs
                 inputs = subprocess.check_output(["pactl", "list", "sink-inputs"]).decode()
-                
                 current_id = None
-                lines = inputs.splitlines()
-                for i, line in enumerate(lines):
+                for line in inputs.splitlines():
                     line = line.strip()
                     if "Sink Input #" in line:
                         current_id = line.split("#")[-1].strip()
-                    
-                    # Look for Python or ALSA Playback related to this script
-                    if current_id and ("application.name = \"python" in line.lower() or "ALSA Playback" in line):
-                        # Move it to our sink
+                    if current_id and "application.name = \"python" in line.lower():
                         subprocess.run(["pactl", "move-sink-input", current_id, SINK_NAME], check=True)
-                        print(f"\n[ SUCCESS ] Moved Python stream {current_id} to {SINK_NAME}")
-                        return # Mission accomplished
-            except Exception:
-                continue
-        print("\n[ WARNING ] Could not auto-route. Please move it manually in Sound Settings.")
+                        print(f"\n[ ROUTING ] Audio moved to {SINK_NAME}")
+                        return
+            except: continue
 
     import threading
     threading.Thread(target=force_route, daemon=True).start()
 
-    packet_count = 0
     try:
         while True:
-            try:
-                data, addr = sock.recvfrom(CHUNK * 4) 
-                stereo_data = b''.join([data[i:i+2]*2 for i in range(0, len(data), 2)])
-                stream.write(stereo_data)
-                
-                packet_count += 1
-                if packet_count % 50 == 0:
-                    print(f"\r[ ACTIVE ] Incoming: {packet_count} packets", end="")
-            except socket.timeout:
-                continue
+            data = sock.recv(CHUNK * 2)
+            if not data: break
+            stereo_data = b''.join([data[i:i+2]*2 for i in range(0, len(data), 2)])
+            stream.write(stereo_data)
     except KeyboardInterrupt:
-        print("\nStopping receiver.")
+        print("\nStopping...")
     finally:
+        sock.close()
         stream.stop_stream()
         stream.close()
         p.terminate()
-        sock.close()
 
 if __name__ == "__main__":
-    start_receiver()
+    target = sys.argv[1] if len(sys.argv) > 1 else None
+    start_receiver(target)
