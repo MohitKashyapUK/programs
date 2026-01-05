@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Website Blocker Settings</title>
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>Website Blocker</h1>
+        <div class="input-group">
+            <input type="text" id="websiteInput" placeholder="Enter website (e.g., example.com)">
+            <button id="addBtn">Block</button>
+        </div>
+        <div class="list-container">
+            <h2>Blocked Websites</h2>
+            <ul id="blockedList">
+                <!-- List items will be added here -->
+            </ul>
+        </div>
+    </div>
+    <script src="options.js"></script>
+</body>
+
+</html>
